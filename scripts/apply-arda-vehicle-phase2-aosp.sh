@@ -10,7 +10,7 @@ Usage:
   BOARD_CONFIG=device/.../BoardConfig.mk \
     ./scripts/apply-arda-vehicle-phase2-aosp.sh
 
-The canonical ARDA Vehicle source is Deadknight/android_vendor_arda under vehicle/.
+The canonical ARDA Vehicle source is arda-aaos/android_vendor_arda under vehicle/.
 The complete Vehicle tree is copied to vendor/arda/vehicle by default.
 ARDA_VEHICLE_SOURCE is optional only when a supported sibling or /tmp vendor clone is present.
 The staged Android ARM64 router binary is required before copy.

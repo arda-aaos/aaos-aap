@@ -1,3 +1,5 @@
+> **Current GitHub organization (2026-11-17):** https://github.com/arda-aaos — repositories transferred. Older Deadknight references in historical checkpoints below describe their original state and are retained for provenance.
+
 # ARDA — AAOS / Android Auto Integration
 
 > Canonical README merged on **2026-09-08** from the supplied README/handover archive plus the later runtime-validated work completed after the archive.
