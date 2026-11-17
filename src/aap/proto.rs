@@ -879,6 +879,8 @@ pub struct ServiceDiscoverySummary {
     pub one_line: String,
     pub details: Vec<String>,
     pub video_media_sink: Option<MediaSinkSelection>,
+    /// Complete HU video sink inventory; legacy session uses video_media_sink only.
+    pub video_media_sinks: Vec<MediaSinkSelection>,
     pub audio_media_sinks: Vec<AudioSinkSelection>,
     pub input_source: Option<InputSourceSelection>,
     pub media_source: Option<MediaSourceSelection>,
@@ -1243,8 +1245,8 @@ fn select_video_config(configs: &[VideoConfiguration], policy: &str) -> Option<V
     }
 }
 
-/// Parse a MESSAGE_SERVICE_DISCOVERY_RESPONSE control payload, select the first
-/// HU video MediaSinkService, and return human-readable details for logs.
+/// Parse a MESSAGE_SERVICE_DISCOVERY_RESPONSE control payload, inventory ALL
+/// HU video MediaSinkServices, and preserve the legacy first-video selection.
 /// `payload` includes the 2-byte control message id.
 pub fn parse_service_discovery_response_control_payload(
     payload: &[u8],
@@ -1267,6 +1269,7 @@ fn summarize_service_discovery_response_body(
     let msg = ServiceDiscoveryResponse::parse_from_bytes(body)?;
     let mut details = Vec::new();
     let mut video_media_sink = None;
+    let mut video_media_sinks: Vec<MediaSinkSelection> = Vec::new();
     let mut audio_media_sinks: Vec<AudioSinkSelection> = Vec::new();
     let mut input_source = None;
     let mut media_source = None;
@@ -1306,7 +1309,7 @@ fn summarize_service_discovery_response_body(
                         | MediaCodecType::MEDIA_CODEC_VIDEO_H265
                 );
 
-            if looks_like_video && video_media_sink.is_none() {
+            if looks_like_video {
                 let first_video_config = sink
                     .video_configs
                     .first()
@@ -1319,7 +1322,7 @@ fn summarize_service_discovery_response_body(
                     .collect::<Vec<_>>();
                 let selected_video_config =
                     select_video_config(&sink.video_configs, video_config_policy);
-                video_media_sink = Some(MediaSinkSelection {
+                let video_sink = MediaSinkSelection {
                     service_id: svc.id(),
                     available_type: available_type.clone(),
                     display_id: sink.display_id(),
@@ -1328,7 +1331,12 @@ fn summarize_service_discovery_response_body(
                     first_video_config,
                     video_config_selections,
                     selected_video_config,
-                });
+                };
+                // Keep the currently working single-video session selection unchanged.
+                if video_media_sink.is_none() {
+                    video_media_sink = Some(video_sink.clone());
+                }
+                video_media_sinks.push(video_sink);
             }
 
             if audio_count > 0 {
@@ -1540,6 +1548,51 @@ fn summarize_service_discovery_response_body(
         details.push(format!("  service id={} {kinds}", svc.id()));
     }
 
+    // Discovery only: do not open extra channels or alter the existing sender.
+    let mut main_count = 0usize;
+    let mut cluster_count = 0usize;
+    let mut aux_count = 0usize;
+    let mut unknown_count = 0usize;
+    let mut observed_service_ids = std::collections::HashSet::new();
+    for sink in &video_media_sinks {
+        match sink.display_type.as_str() {
+            "DISPLAY_TYPE_MAIN" => main_count += 1,
+            "DISPLAY_TYPE_CLUSTER" => cluster_count += 1,
+            "DISPLAY_TYPE_AUXILIARY" => aux_count += 1,
+            _ => unknown_count += 1,
+        }
+        details.push(format!(
+            "ARDA_VIDEO_SINK_DISCOVERED role={} service_id={} display_id={} configs={} selected={:?}",
+            sink.display_type, sink.service_id, sink.display_id,
+            sink.video_configs, sink.selected_video_config.as_ref().map(|c| c.summary.as_str()),
+        ));
+        if sink.service_id <= 0 || sink.service_id > u8::MAX as i32
+            || !observed_service_ids.insert(sink.service_id)
+        {
+            details.push(format!(
+                "ARDA_VIDEO_SINK_WARNING invalid_or_duplicate_service_id={}", sink.service_id,
+            ));
+        }
+    }
+    details.push(format!(
+        "ARDA_VIDEO_SINK_INVENTORY total={} main={} cluster={} auxiliary={} unknown={}",
+        video_media_sinks.len(), main_count, cluster_count, aux_count, unknown_count,
+    ));
+    if main_count > 1 || cluster_count > 1 {
+        details.push(format!(
+            "ARDA_VIDEO_SINK_WARNING duplicate_role main={} cluster={} extra_channels_disabled=true",
+            main_count, cluster_count,
+        ));
+    }
+    if let Some(selected) = video_media_sink.as_ref() {
+        if selected.display_type != "DISPLAY_TYPE_MAIN" {
+            details.push(format!(
+                "ARDA_VIDEO_SINK_WARNING legacy_first_sink_non_main role={} service_id={} extra_channels_disabled=true",
+                selected.display_type, selected.service_id,
+            ));
+        }
+    }
+
     let one_line = if let Some(video) = &video_media_sink {
         format!(
             "MESSAGE_SERVICE_DISCOVERY_RESPONSE services={} selected_video_service={} type={} display_id={} display_type={} video_configs={}",
@@ -1561,6 +1614,7 @@ fn summarize_service_discovery_response_body(
         one_line,
         details,
         video_media_sink,
+        video_media_sinks,
         audio_media_sinks,
         input_source,
         media_source,

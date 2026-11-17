@@ -137,6 +137,8 @@ fn request_session_shutdown() {
 pub mod proto;
 mod fragment;
 mod tls;
+mod video_routes;
+mod secondary_video;
 
 #[derive(Debug)]
 enum UsbReadEvent {
@@ -2855,6 +2857,8 @@ pub fn tls_service_discovery_probe(config: TlsHandshakeProbeConfig) -> io::Resul
     let mut service_request_sent = false;
     let mut channel_open_sent = false;
     let mut selected_video_service_id: Option<i32> = None;
+    // V27 secondary channel state is isolated from legacy MAIN.
+    let mut secondary_video_state: Option<secondary_video::SecondaryVideoState> = None;
     let mut selected_input_service_id: Option<i32> = None;
     let mut selected_input_source: Option<proto::InputSourceSelection> = None;
     let mut selected_video_config_for_input: Option<proto::VideoConfigSelection> = None;
@@ -3250,6 +3254,45 @@ pub fn tls_service_discovery_probe(config: TlsHandshakeProbeConfig) -> io::Resul
                         log_line(&mut dump, line)?;
                     }
 
+                    // ARDA_V26_VIDEO_ROUTE_PLAN — inert safety-checked route descriptors.
+                    // Production MAIN sender and channel open stay unchanged.
+                    match video_routes::plan(
+                        &summary.video_media_sinks,
+                        summary.video_media_sink.as_ref().map(|v| v.service_id),
+                    ) {
+                        Ok(plan) => {
+                            secondary_video_state = Some(secondary_video::SecondaryVideoState::from_plan(&plan));
+                            let line = format!(
+                                "ARDA_V26_ROUTE_PLAN=PASS main={} routes={} secondary_tx=DISABLED",
+                                plan.main_id, plan.routes.len(),
+                            );
+                            println!("{line}");
+                            log_line(&mut dump, &line)?;
+                            for route in &plan.routes {
+                                let line = format!(
+                                    "ARDA_V26_ROUTE role={:?} id={} display={} phase={:?} config={:?}",
+                                    route.role, route.service_id, route.display_id,
+                                    route.phase, route.selected_config_index,
+                                );
+                                println!("{line}");
+                                log_line(&mut dump, &line)?;
+                            }
+                            for warning in &plan.warnings {
+                                let line = format!("ARDA_V26_ROUTE_WARNING={warning}");
+                                println!("{line}");
+                                log_line(&mut dump, &line)?;
+                            }
+                        }
+                        Err(reason) => {
+                            // Do not touch the currently working legacy MAIN session.
+                            // Secondary channels remain disabled independently of this error.
+                            let line = format!(
+                                "ARDA_V26_ROUTE_PLAN=REJECT reason={reason} secondary_tx=DISABLED"
+                            );
+                            println!("{line}");
+                            log_line(&mut dump, &line)?;
+                        }
+                    }
                     let input_candidate = summary.input_source.clone();
                     let audio_candidates = summary.audio_media_sinks.clone();
                     let mic_candidate = summary.media_source.clone();
@@ -3757,6 +3800,15 @@ pub fn tls_service_discovery_probe(config: TlsHandshakeProbeConfig) -> io::Resul
                             log_line(&mut dump, "SENSOR_OPEN requested but SDR has no SensorSourceService candidate")?;
                         }
                     }
+                }
+            }
+
+            // ARDA_V27_SECONDARY_RX_PASSIVE. No new channel open/TX/ACK.
+            // Observations are bounded in logging, and MAIN is excluded.
+            if let Some(state) = secondary_video_state.as_mut() {
+                if let Some(line) = state.observe(frame.channel, (frame.flags & FLAG_CONTROL) != 0) {
+                    println!("{line}");
+                    log_line(&mut dump, &line)?;
                 }
             }
 
@@ -5479,6 +5531,12 @@ pub fn tls_service_discovery_probe(config: TlsHandshakeProbeConfig) -> io::Resul
         sender.stop();
         println!("SESSION_CLEANUP video sender stopped");
         let _ = log_line(&mut dump, "SESSION_CLEANUP video sender stopped");
+    }
+    if let Some(state) = secondary_video_state.as_ref() {
+        for line in state.summary_lines() {
+            println!("{line}");
+            let _ = log_line(&mut dump, &line);
+        }
     }
     let _ = reset_projection_content_insets(&mut dump, cleanup_reason);
     println!("SESSION_CLEANUP end reason={}", cleanup_reason);
